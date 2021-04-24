@@ -350,38 +350,16 @@ wait(void)
           }
           else if(p->mlfq_level == 1){
             pop(mlfq->mqueue, p);
-	    if(mlfq->mqueue->cur->next == 0){
-	      mlfq->mqueue->cur = mlfq->mqueue->front;
-	    }
-	    else{
-	      mlfq->mqueue->cur = mlfq->mqueue->cur->next;
-	    }
           }
           else{
             pop(mlfq->lqueue, p);
-	    if(mlfq->lqueue->cur->next == 0){
-              mlfq->lqueue->cur = mlfq->lqueue->front;
-            }
-            else{
-              mlfq->lqueue->cur = mlfq->lqueue->cur->next;
-            }
           }
 	}
 	else{
 	  pq_select_pop(pq, p->pid);
 	  mproc->ticket += p->ticket;
 	}
-//        cprintf("\n");
-//	cprintf("-----------state report------------------\n");
-//	cprintf("After pid %d exit\n", p->pid);
-//	cprintf("MLFQ\n");
- //	cprintf("hqueue count: %d\n", mlfq->hqueue->count);
-//	cprintf("mqueue count: %d\n", mlfq->mqueue->count);
-//	cprintf("lqueue count: %d\n", mlfq->lqueue->count);
-//	cprintf("STRIDE\n");
-//	cprintf("priority queue count: %d\n", pq->count);
-//	cprintf("\n");
-
+        cprintf("pid %d exit\n", p->pid);
 
         pid = p->pid;
         kfree(p->kstack);
@@ -412,7 +390,8 @@ wait(void)
 int
 getlev(void)
 {
-  return myproc()->mlfq_level;
+  struct proc *curproc = myproc();
+  return curproc->mlfq_level;
 }
 
 int
@@ -424,7 +403,7 @@ set_cpu_share(int share)
   struct priority_queue *pq = &priqueue;
  
   if(mproc->ticket - share < 20){
-    return -1;
+    panic("greedy");
   }
 
   acquire(&ptable.lock);
@@ -485,10 +464,6 @@ chkallot(struct queue *now,  struct queue *low)
 	now->cur = candidate_cur;
       }
     }
-    if(temp == 0){
-      cprintf("chkallot!!\n");
-    }
-    temp->next = 0;
     push(low, temp);
     if(low->count == 1){
       init_qcur(low);
@@ -562,13 +537,20 @@ stride_scheduling(void)
     p = pq_pop(pq);
     while(p->state != RUNNABLE){
       temp_proc[idx++] = p;
-      p = pq_pop(pq);
+      if((p = pq_pop(pq)) == (struct proc *)-1){
+	for(int i = 0; i < idx; i++){
+	  pq_push(pq, temp_proc[i]);
+	}
+	return ;
+      }
     }
     for(int i = 0; i < idx; i++){
       pq_push(pq, temp_proc[i]);
     }
     
 //    p = pq_pop(pq);   
+
+    cprintf("stride scheduling: pid %d\n", p->pid);
 
     if(p->ismlfq == 1){
       p->pass += p->stride;
@@ -588,15 +570,6 @@ stride_scheduling(void)
     }
   }
 }
-
-//PAGEBREAK: 42
-// Per-CPU process scheduler.
-// Each CPU calls scheduler() after setting itself up.
-// Scheduler never returns.  It loops, doing:
-//  - choose a process to run
-//  - swtch to start running that process
-//  - eventually that process transfers control
-//      via swtch back to the scheduler.
 
 void
 scheduler(void)
@@ -618,6 +591,9 @@ scheduler(void)
   //initialize priority queue(for stride scheduling)
   init_priqueue(pq);
 
+  //initialize current process in the highest level queue.
+  init_qcur(hqueue);
+  
   //initialize and push mlfq process(not a real process).
   init_mproc();
   pq_push(pq, mproc);
@@ -628,7 +604,7 @@ scheduler(void)
     acquire(&ptable.lock);
 
     //High priority q
-    int all_unrunnable = 1;
+    int allunrunnable = 1;
 
     //cprintf("hqueue count : %d\n", hqueue->count);
    
@@ -637,7 +613,7 @@ scheduler(void)
       if(p->state != RUNNABLE){
 	continue;
       }
-      all_unrunnable = 0;
+      allunrunnable = 0;
 
       hqueue->cur = n;
       c->proc = p;
@@ -647,15 +623,12 @@ scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
+      p->tick++;
       mlfq->totalticks++;
-      if(p->pid != 0){
-	p->tick++;
-	if(chkboost() == 0){
-	  chkallot(hqueue, mqueue);
-	}
-      }
-      chkboost();
 
+      if(chkboost() == 0){
+	chkallot(hqueue, mqueue);
+      }
       c->proc = 0;
       
       //stride scheduling
@@ -665,7 +638,7 @@ scheduler(void)
     }
  
     //determine weather go down or not
-    if((all_unrunnable == 0) && (hqueue->count > 0)){
+    if(allunrunnable == 0 && hqueue->count > 0){
       release(&ptable.lock);
       continue;
     }
@@ -673,13 +646,13 @@ scheduler(void)
     //cprintf("mqueue count : %d\n", mqueue->count);
 
     //Middle priority q
-    all_unrunnable = 1;
+    allunrunnable = 1;
     for(n = mqueue->cur; n != 0; n = n->next){
       p = n->proc;
       if(p->state != RUNNABLE){
 	continue;
       }
-      all_unrunnable = 0;
+      allunrunnable = 0;
       
       mqueue->cur = n;
       c->proc = p;    
@@ -689,17 +662,14 @@ scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
+      p->tick++;
       mlfq->totalticks++;
-      if(p->pid != 0){
-        p->tick++;
-        if(chkboost() == 0){
-          if(chkallot(mqueue, lqueue) == 0){
-	    chkquant(mqueue);
-	  }
-        }
-      }
-      chkboost();
 
+      if(chkboost() == 0){
+	if(chkallot(mqueue, lqueue)== 0){
+	  chkquant(mqueue);
+	}
+      }
       c->proc = 0;
        
       if(pq->count > 1){
@@ -709,20 +679,20 @@ scheduler(void)
     }
     
     //determine weather go down or not
-    if((all_unrunnable == 0) && (mqueue->count > 0)){
+    if(allunrunnable == 0 && mqueue->count > 0){
       release(&ptable.lock);
       continue;
     }
 
     //Low priority q
-    all_unrunnable = 1;
+    allunrunnable = 1;
 
     for(n = lqueue->cur; n != 0; n = n->next){
       p = n->proc;
       if(p->state != RUNNABLE){
 	continue;
       }
-      all_unrunnable = 0;
+      allunrunnable = 0;
 
       lqueue->cur = n;
       c->proc = p;
@@ -732,14 +702,12 @@ scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
+      p->tick++;
       mlfq->totalticks++;
-      if(p->pid != 0){
-	p->tick++;
-	if(chkboost() == 0){
-	  chkquant(lqueue);
-	}
+
+      if(chkboost() == 0){
+	chkquant(lqueue);
       }
-      chkboost();
       c->proc = 0;
  
       //stride scheduling
@@ -748,6 +716,11 @@ scheduler(void)
       }     
       break;
     }
+    //determine weather go down or not
+    if(allunrunnable == 0 && lqueue->count > 0){
+      release(&ptable.lock);
+      continue;
+    }
     if(pq->count > 1){
       stride_scheduling();
     }
@@ -755,6 +728,52 @@ scheduler(void)
   }
 }
 
+
+//PAGEBREAK: 42
+// Per-CPU process scheduler.
+// Each CPU calls scheduler() after setting itself up.
+// Scheduler never returns.  It loops, doing:
+//  - choose a process to run
+//  - swtch to start running that process
+//  - eventually that process transfers control
+//      via swtch back to the scheduler.
+//void
+//scheduler(void)
+//{
+//  myscheduler();
+//}
+//  struct proc *p;
+//  struct cpu *c = mycpu();
+//  c->proc = 0;
+  
+//  for(;;){
+    // Enable interrupts on this processor.
+//    sti();
+
+//    // Loop over process table looking for process to run.
+//    acquire(&ptable.lock);
+//    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+//      if(p->state != RUNNABLE)
+//        continue;
+
+//      // Switch to chosen process.  It is the process's job
+//      // to release ptable.lock and then reacquire it
+//      // before jumping back to us.
+//      c->proc = p;
+//      switchuvm(p);
+//      p->state = RUNNING;
+
+//      swtch(&(c->scheduler), p->context);
+//      switchkvm();
+
+//      // Process is done running for now.
+//      // It should have changed its p->state before coming back.
+//      c->proc = 0;
+//    }
+//    release(&ptable.lock);
+
+//  }
+//}
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
