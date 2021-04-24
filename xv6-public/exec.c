@@ -6,6 +6,10 @@
 #include "defs.h"
 #include "x86.h"
 #include "elf.h"
+#include "queue.h"
+#include "mlfq.h"
+
+extern struct mlfq mlfqueue;
 
 int
 exec(char *path, char **argv)
@@ -101,6 +105,7 @@ exec(char *path, char **argv)
   curproc->tf->esp = sp;
   switchuvm(curproc);
   freevm(oldpgdir);
+
   return 0;
 
  bad:

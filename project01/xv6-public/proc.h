@@ -51,7 +51,7 @@ struct proc {
   char name[16];               // Process name (debugging)
   int tick;
   int mlfq_level;
-  int pass;
+  float pass;
   float stride;
   float ticket;
   int ismlfq;

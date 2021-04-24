@@ -95,3 +95,26 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+void
+sys_yield(void)
+{
+  return yield();  
+}
+
+int
+sys_getlev(void)
+{
+  return getlev();
+}
+
+int
+sys_set_cpu_share(void)
+{
+  int n;
+  
+  if(argint(0, &n)<0){
+    return -1;
+  }
+  return set_cpu_share(n);
+}
