@@ -382,7 +382,6 @@ wait(void)
 //	cprintf("priority queue count: %d\n", pq->count);
 //	cprintf("\n");
 
-
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
@@ -944,3 +943,205 @@ getppid(void)
     return myproc()->parent->pid;
 }
 
+//From here, LWP starts.
+int
+thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
+{
+  struct proc *nt;
+  struct proc *curproc = myproc();
+  struct mlfq *mlfq = &mlfqueue;
+
+  uint argc, sz, sp, ustack[3+MAXARG+1];
+  pde_t *pgdir;
+
+  if((nt = allocproc()) == 0){
+    return -1;
+  }
+
+  nt->parent = curproc->parent;
+
+  //trap frame
+  nt->sz = PGSIZE;
+  memset(nt->tf, 0, sizeof(*nt->tf));
+  nt->tf->cs = (SEG_UCODE << 3) | DPL_USER;
+  nt->tf->ds = (SEG_UDATA << 3) | DPL_USER;
+  nt->tf->es = nt->tf->ds;
+  nt->tf->ss = nt->tf->ds;
+  nt->tf->eflags = FL_IF;
+  nt->tf->esp = PGSIZE;
+  nt->tf->eip =(uint)start_routine;
+
+  safestrcpy(nt->name, "initcode", sizeof(nt->name));
+  nt->cwd = namei("/");
+
+  safestrcpy(nt->name, curproc->name, sizeof(curproc->name));
+
+  sz = PGROUNDUP(curproc->sz);
+  pgdir = curproc->pgdir;
+
+  if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0){
+    freevm(pgdir);
+    return -1;
+  }
+  clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+  sp = sz;
+
+  // Push argument strings, prepare rest of stack in ustack.
+  sp = (sp - (strlen(arg) + 1)) & ~3;
+  if(copyout(pgdir, sp, arg, strlen(arg) + 1) < 0){
+    freevm(pgdir);
+    return -1;
+  }
+  argc = 1;
+
+  ustack[3] = sp;
+  ustack[3+argc] = 0;
+
+  ustack[0] = 0xffffffff;  // fake return PC
+  ustack[1] = 1;
+  ustack[2] = sp - (1+argc)*4;  // argv pointer
+
+  sp -= (3+argc+1) * 4;
+  if(copyout(pgdir, sp, ustack, (3+argc+1)*4) < 0){
+    freevm(pgdir);
+    return -1;
+  }
+  
+  nt->pgdir = curproc->pgdir = pgdir;
+  nt->sz = curproc->sz = sz;
+  nt->tf->esp = sp;
+
+  acquire(&ptable.lock);
+  
+  nt->state = RUNNABLE;
+  nt->tick = 0;
+  nt->mlfq_level = 0;
+  nt->ismlfq = 0;
+  createnode(nt, &node[index]);
+  push(mlfq->hqueue, &node[index]);
+  if(mlfq->hqueue->count == 1){
+    mlfq->hqueue->cur = mlfq->hqueue->front;
+  }
+
+  release(&ptable.lock);
+
+  return 0;
+}
+
+void
+thread_exit(void *retval)
+{
+  struct proc *curproc = myproc();
+  struct proc *p;
+  int fd;
+
+  if(curproc == initproc)
+    panic("init exiting");
+
+  // Close all open files.
+  for(fd = 0; fd < NOFILE; fd++){
+    if(curproc->ofile[fd]){
+      fileclose(curproc->ofile[fd]);
+      curproc->ofile[fd] = 0;
+    }
+  }
+
+  begin_op();
+  iput(curproc->cwd);
+  end_op();
+  curproc->cwd = 0;
+
+  curproc->thread_retval = retval;
+
+  acquire(&ptable.lock);
+
+  // Parent might be sleeping in wait().
+  wakeup1(curproc);
+
+  // Pass abandoned children to init.
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->parent == curproc){
+      p->parent = initproc;
+      if(p->state == ZOMBIE)
+        wakeup1(initproc);
+    }
+  }
+
+  // Jump into the scheduler, never to return.
+  curproc->state = ZOMBIE;
+  sched();
+  panic("zombie exit");	
+}
+
+int
+thread_join(thread_t thread, void **retval)
+{
+  struct proc *p;
+  struct proc *curproc = myproc();
+  struct mlfq *mlfq = &mlfqueue;
+  struct priority_queue *pq = &priqueue;
+  struct proc *mproc = &mlfq_proc;
+
+  acquire(&ptable.lock);
+  for(;;){
+    // Scan through table looking for exited children.
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->pid != thread)
+        continue;
+      if(p->state == ZOMBIE){
+        // Found one.
+
+        if(p->ticket == 0){
+          if(p->mlfq_level == 0){
+            pop(mlfq->hqueue, p);
+          }
+          else if(p->mlfq_level == 1){
+            pop(mlfq->mqueue, p);
+            if(mlfq->mqueue->cur->next == 0){
+              mlfq->mqueue->cur = mlfq->mqueue->front;
+            }  
+	    else{
+              mlfq->mqueue->cur = mlfq->mqueue->cur->next;
+            }
+          }
+          else{
+            pop(mlfq->lqueue, p);
+            if(mlfq->lqueue->cur->next == 0){
+              mlfq->lqueue->cur = mlfq->lqueue->front;
+            }
+            else{
+              mlfq->lqueue->cur = mlfq->lqueue->cur->next;
+            }
+          }
+        }
+        else{
+          pq_select_pop(pq, p->pid);
+          mproc->ticket += p->ticket;
+        }
+
+        kfree(p->kstack);
+        p->kstack = 0;
+        freevm(p->pgdir);
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+
+	*retval = p->thread_retval;
+	p->thread_retval = 0;
+        p->state = UNUSED;
+
+        release(&ptable.lock);
+      }
+    }
+
+    // No point waiting if we don't have any children.
+    if(curproc->killed){
+      release(&ptable.lock);
+      return -1;
+    }
+
+    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
+    sleep(p, &ptable.lock);  //DOC: wait-sleep
+  }
+}
