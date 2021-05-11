@@ -123,6 +123,9 @@ void            yield(void);
 int		getppid(void);
 int		getlev(void);
 int		set_cpu_share(int);
+int		thread_create(thread_t *, void *(*)(void *), void *);
+void		thread_exit(void *retval);
+int		thread_join(thread_t, void **retval);
 
 // swtch.S
 void            swtch(struct context**, struct context*);

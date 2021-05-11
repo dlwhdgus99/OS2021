@@ -55,6 +55,7 @@ struct proc {
   float stride;
   float ticket;
   int ismlfq;
+  void *thread_retval;
 };
 
 // Process memory is laid out contiguously, low addresses first:
