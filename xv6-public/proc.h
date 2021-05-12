@@ -56,6 +56,9 @@ struct proc {
   float ticket;
   int ismlfq;
   void *thread_retval;
+  char *ustack;
+  char *guard;
+  uint ustack_va; 
 };
 
 // Process memory is laid out contiguously, low addresses first:

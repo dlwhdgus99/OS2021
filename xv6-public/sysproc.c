@@ -129,6 +129,7 @@ sys_thread_create(void)
   if(argptr(0, (void *)&thread, sizeof(*thread)) < 0 || 
      argptr(1, (void *)&start_routine, sizeof(*start_routine)) < 0 || 
      argptr(2,(void *)&arg, sizeof(*arg)) < 0) {
+    cprintf("arg panic\n");
     return -1;
   }
   return thread_create(thread, start_routine, arg);
