@@ -61,6 +61,8 @@ kfree(char *v)
 {
   struct run *r;
 
+  if(v == 0) cprintf("kfree null\n");
+
   if((uint)v % PGSIZE || v < end || V2P(v) >= PHYSTOP)
     panic("kfree");
 
@@ -72,6 +74,7 @@ kfree(char *v)
   r = (struct run*)v;
   r->next = kmem.freelist;
   kmem.freelist = r;
+  if(kmem.freelist == 0) cprintf("here!!!\n");
   if(kmem.use_lock)
     release(&kmem.lock);
 }
@@ -87,8 +90,10 @@ kalloc(void)
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(kmem.freelist == 0) cprintf("here2!!!\n");
+  if(r && r->next){
     kmem.freelist = r->next;
+  }
   if(kmem.use_lock)
     release(&kmem.lock);
   return (char*)r;

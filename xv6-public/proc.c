@@ -100,6 +100,7 @@ allocproc(void)
       goto found;
     }
 
+  cprintf("not found panic\n");
   release(&ptable.lock);
   return 0;
 
@@ -112,6 +113,7 @@ found:
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
     p->state = UNUSED;
+    cprintf("kernel stack panic\n");
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
@@ -462,7 +464,6 @@ chkquant(struct queue *q)
     else{
       q->cur = q->cur->next;
     }
-   
     return 1;
   }
   return 0;
@@ -636,6 +637,8 @@ scheduler(void)
       if(p->state != RUNNABLE){
 	continue;
       }
+
+      //cprintf("hqueue count: %d\n", hqueue->count);
       all_unrunnable = 0;
 
       hqueue->cur = n;
@@ -678,6 +681,8 @@ scheduler(void)
       if(p->state != RUNNABLE){
 	continue;
       }
+      //cprintf("mqueue count: %d\n", mqueue->count);
+      //cprintf("thread %d running\n", p->pid);
       all_unrunnable = 0;
       
       mqueue->cur = n;
@@ -706,6 +711,9 @@ scheduler(void)
       }
       break;
     }
+    if(n == 0){
+      mqueue->cur = mqueue->front;
+    }
     
     //determine weather go down or not
     if((all_unrunnable == 0) && (mqueue->count > 0)){
@@ -713,6 +721,7 @@ scheduler(void)
       continue;
     }
 
+    //cprintf("lqueue count: %d\n", lqueue->count);
     //Low priority q
     all_unrunnable = 1;
 
@@ -721,6 +730,8 @@ scheduler(void)
       if(p->state != RUNNABLE){
 	continue;
       }
+      //cprintf("lqueue count: %d\n", lqueue->count);
+      //cprintf("thread %d running\n", p->pid);
       all_unrunnable = 0;
 
       lqueue->cur = n;
@@ -746,7 +757,11 @@ scheduler(void)
         stride_scheduling(); 
       }     
       break;
+    } 
+    if(n == 0){
+      lqueue->cur = lqueue->front;
     }
+
     if(pq->count > 1){
       stride_scheduling();
     }
@@ -799,6 +814,8 @@ forkret(void)
   static int first = 1;
   // Still holding ptable.lock from scheduler.
   release(&ptable.lock);
+
+  //cprintf("thread comes forkret: %d\n", myproc()->pid);
 
   if (first) {
     // Some initialization functions must be run in the context
@@ -951,27 +968,32 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
   struct proc *curproc = myproc();
   struct mlfq *mlfq = &mlfqueue;
 
-  uint argc, sz, sp, ustack[3+MAXARG+1];
+  uint sz, sp, ustack[3];
   pde_t *pgdir;
+  char *mem = 0;
+  uint a, newsz, oldsz;
 
   if((nt = allocproc()) == 0){
+    cprintf("allocproc panic\n");
     return -1;
   }
+  *thread = nt->pid;
+  //cprintf("new thread created: %d\n", nt->pid);
 
   nt->parent = curproc->parent;
 
   //trap frame
-  nt->sz = PGSIZE;
-  memset(nt->tf, 0, sizeof(*nt->tf));
-  nt->tf->cs = (SEG_UCODE << 3) | DPL_USER;
-  nt->tf->ds = (SEG_UDATA << 3) | DPL_USER;
-  nt->tf->es = nt->tf->ds;
-  nt->tf->ss = nt->tf->ds;
-  nt->tf->eflags = FL_IF;
-  nt->tf->esp = PGSIZE;
-  nt->tf->eip =(uint)start_routine;
+  //nt->sz = PGSIZE;
+  //memset(nt->tf, 0, sizeof(*nt->tf));
+  //nt->tf->cs = (SEG_UCODE << 3) | DPL_USER;
+  //nt->tf->ds = (SEG_UDATA << 3) | DPL_USER;
+  //nt->tf->es = nt->tf->ds;
+  //nt->tf->ss = nt->tf->ds;
+  //nt->tf->eflags = FL_IF;
+  //nt->tf->esp = PGSIZE;
+  *nt->tf = *curproc->tf;
+  //cprintf("start routine: %d", (int)start_routine);
 
-  safestrcpy(nt->name, "initcode", sizeof(nt->name));
   nt->cwd = namei("/");
 
   safestrcpy(nt->name, curproc->name, sizeof(curproc->name));
@@ -979,40 +1001,80 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
   sz = PGROUNDUP(curproc->sz);
   pgdir = curproc->pgdir;
 
-  if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0){
-    freevm(pgdir);
-    return -1;
+  oldsz = sz;
+  newsz = sz + 2*PGSIZE;
+
+  if(newsz >= KERNBASE){
+    uint start = PGROUNDUP(KERNBASE - PGSIZE);
+    int success = 0;
+    pte_t *pte1;
+    pte_t *pte2;
+    for(uint i = start; i > 0; i -= PGSIZE){
+      pte1 = walkpgdir(pgdir, (char*)(i-PGSIZE), 0);
+      pte2 = walkpgdir(pgdir, (char*)(i-2*PGSIZE), 0); 
+      if(!pte1 && !pte2){
+	cprintf("found!\n");
+	allocuvm(pgdir, i-2*PGSIZE, i);
+	sz = oldsz;
+	nt->ustack_va = i;
+	sp = i;
+	clearpteu(pgdir, (char*)(i-2*PGSIZE));
+	success = 1;
+	break;
+      }
+    }
+    if(!success){
+      cprintf("kernbase panic\n");
+      return -1;
+    }
   }
-  clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
-  sp = sz;
+  else{
+    a = PGROUNDUP(oldsz);
+    int i = 0;
+    for(; a < newsz; a += PGSIZE, i++){
+      mem = kalloc();
+      if(mem == 0){
+        cprintf("alloc user stack out of memory\n");
+        deallocuvm(pgdir, newsz, oldsz);
+        return -1;
+      }
+      memset(mem, 0, PGSIZE);
+      if(mappages(pgdir, (char*)a, PGSIZE, V2P(mem), PTE_W|PTE_U) < 0){
+        cprintf("alloc user stack out of memory (2)\n");
+        deallocuvm(pgdir, newsz, oldsz);
+        kfree(mem);
+        return -1;
+      }
+    //if(i == 0) nt->guard = mem;
+    //else nt->ustack = mem;
+    }
+    sz = newsz;
+    nt->ustack_va = sz;
+    clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+    sp = sz;
+  }
 
   // Push argument strings, prepare rest of stack in ustack.
-  sp = (sp - (strlen(arg) + 1)) & ~3;
-  if(copyout(pgdir, sp, arg, strlen(arg) + 1) < 0){
+  ustack[0] = nt->tf->eip; // fake return PC
+  ustack[1] = (int)arg;
+
+  //cprintf("arg value: %d\n", (int)arg);
+
+  nt->tf->eip = (uint)(start_routine);
+
+  sp -= 2*4;
+  if(copyout(pgdir, sp, ustack, 2*4) < 0){
     freevm(pgdir);
+    cprintf("copyout panic\n");
     return -1;
   }
-  argc = 1;
 
-  ustack[3] = sp;
-  ustack[3+argc] = 0;
-
-  ustack[0] = 0xffffffff;  // fake return PC
-  ustack[1] = 1;
-  ustack[2] = sp - (1+argc)*4;  // argv pointer
-
-  sp -= (3+argc+1) * 4;
-  if(copyout(pgdir, sp, ustack, (3+argc+1)*4) < 0){
-    freevm(pgdir);
-    return -1;
-  }
+  acquire(&ptable.lock);
   
   nt->pgdir = curproc->pgdir = pgdir;
   nt->sz = curproc->sz = sz;
   nt->tf->esp = sp;
-
-  acquire(&ptable.lock);
-  
+ 
   nt->state = RUNNABLE;
   nt->tick = 0;
   nt->mlfq_level = 0;
@@ -1035,6 +1097,8 @@ thread_exit(void *retval)
   struct proc *p;
   int fd;
 
+  //cprintf("thread %d exiting.\n", curproc->pid);
+
   if(curproc == initproc)
     panic("init exiting");
 
@@ -1051,12 +1115,8 @@ thread_exit(void *retval)
   end_op();
   curproc->cwd = 0;
 
-  curproc->thread_retval = retval;
-
   acquire(&ptable.lock);
-
-  // Parent might be sleeping in wait().
-  wakeup1(curproc);
+  curproc->thread_retval = retval;
 
   // Pass abandoned children to init.
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
@@ -1069,6 +1129,7 @@ thread_exit(void *retval)
 
   // Jump into the scheduler, never to return.
   curproc->state = ZOMBIE;
+  wakeup1(curproc);
   sched();
   panic("zombie exit");	
 }
@@ -1077,10 +1138,13 @@ int
 thread_join(thread_t thread, void **retval)
 {
   struct proc *p;
+  struct proc *channel = 0;
   struct proc *curproc = myproc();
   struct mlfq *mlfq = &mlfqueue;
   struct priority_queue *pq = &priqueue;
   struct proc *mproc = &mlfq_proc;
+
+  //cprintf("thread %d joininig\n", curproc->pid);
 
   acquire(&ptable.lock);
   for(;;){
@@ -1088,6 +1152,7 @@ thread_join(thread_t thread, void **retval)
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->pid != thread)
         continue;
+      channel = p;
       if(p->state == ZOMBIE){
         // Found one.
 
@@ -1118,10 +1183,8 @@ thread_join(thread_t thread, void **retval)
           pq_select_pop(pq, p->pid);
           mproc->ticket += p->ticket;
         }
-
         kfree(p->kstack);
         p->kstack = 0;
-        freevm(p->pgdir);
         p->pid = 0;
         p->parent = 0;
         p->name[0] = 0;
@@ -1131,7 +1194,10 @@ thread_join(thread_t thread, void **retval)
 	p->thread_retval = 0;
         p->state = UNUSED;
 
+        deallocuvm(p->pgdir, p->ustack_va, p->ustack_va-2*PGSIZE);
+        p->ustack_va = 0;
         release(&ptable.lock);
+	return 0;
       }
     }
 
@@ -1142,6 +1208,7 @@ thread_join(thread_t thread, void **retval)
     }
 
     // Wait for children to exit.  (See wakeup1 call in proc_exit.)
-    sleep(p, &ptable.lock);  //DOC: wait-sleep
+    //cprintf("not found..sleep\n");
+    sleep(channel, &ptable.lock);  //DOC: wait-sleep
   }
 }
