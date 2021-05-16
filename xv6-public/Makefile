@@ -31,6 +31,7 @@ OBJS = \
 	queue.o\
 	mlfq.o\
 	priqueue.o\
+	thread.o\
 
 # Cross-compiling (e.g., on Mac OS X)
 # TOOLPREFIX = i386-jos-elf

@@ -64,6 +64,8 @@ exec(char *path, char **argv)
   end_op();
   ip = 0;
 
+  curproc->static_size = PGROUNDUP(sz);  
+
   // Allocate two pages at the next page boundary.
   // Make the first inaccessible.  Use the second as the user stack.
   sz = PGROUNDUP(sz);
