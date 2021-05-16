@@ -90,8 +90,7 @@ kalloc(void)
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = kmem.freelist;
-  if(kmem.freelist == 0) cprintf("here2!!!\n");
-  if(r && r->next){
+  if(r){
     kmem.freelist = r->next;
   }
   if(kmem.use_lock)

@@ -85,20 +85,18 @@ void nop(){ }
 void*
 racingthreadmain(void *arg)
 {
-  printf(1, "thread %d comes into the start routine.\n");
   int tid = (int) arg;
   int i;
   //int j;
   int tmp;
   
-  printf(1, "thread %d comes into the start routine.\n");
+  //printf(1, "thread %d comes into the start routine.\n");
   for (i = 0; i < 10000000; i++){
     tmp = gcnt;
     tmp++;
 	asm volatile("call %P0"::"i"(nop));
     gcnt = tmp;
   }
-  printf(1, "thread %d comes into the racingthreadmain - before exit\n");
   thread_exit((void *)(tid+1));
 
   return 0;
@@ -120,8 +118,6 @@ racingtest(void)
       return -1;
     }
   }
-
-  printf(1, "create complete\n");
 
   for (i = 0; i < NUM_THREAD; i++){
     if (thread_join(threads[i], &retval) != 0 || (int)retval != i+1){
@@ -145,7 +141,6 @@ basicthreadmain(void *arg)
       printf(1, "%d", tid);
     }
   }
-  printf(1, "basicthreadmain exiting\n");
   thread_exit((void *)(tid+1));
 
   return 0;
@@ -241,7 +236,6 @@ jointest2(void)
 void*
 stressthreadmain(void *arg)
 {
-  printf(1, "stressthreadmain exiting\n");
   thread_exit(0);
 
   return 0;

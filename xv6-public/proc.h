@@ -56,9 +56,11 @@ struct proc {
   float ticket;
   int ismlfq;
   void *thread_retval;
-  char *ustack;
-  char *guard;
+  //char *ustack;
+  //char *guard;
   uint ustack_va; 
+  struct lwp_group *my_lwp_group;
+  uint static_size;
 };
 
 // Process memory is laid out contiguously, low addresses first:
