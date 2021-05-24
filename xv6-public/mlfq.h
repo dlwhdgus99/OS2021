@@ -13,4 +13,7 @@ struct mlfq{
 void
 initmlfq(struct mlfq *mlfq, struct queue *h, struct queue *m, struct queue *l);
 
+void
+pushToMlfq(struct mlfq *mlfq, struct node *node, struct proc *p);
+
 #endif

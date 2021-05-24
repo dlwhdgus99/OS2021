@@ -3,7 +3,7 @@
 #include "user.h"
 
 #define NUM_THREAD 10
-#define NTEST 14
+#define NTEST 15
 
 // Show race condition
 int racingtest(void);
@@ -41,6 +41,9 @@ int sleeptest(void);
 // Test behavior when we use set_cpu_share with thread
 int stridetest(void);
 
+// Test behavior when thread calls thread_create
+int cornercasetest(void);
+
 volatile int gcnt;
 int gpipe[2];
 
@@ -59,6 +62,7 @@ int (*testfunc[NTEST])(void) = {
   pipetest,
   sleeptest,
   stridetest,
+  cornercasetest,
 };
 char *testname[NTEST] = {
   "racingtest",
@@ -75,6 +79,7 @@ char *testname[NTEST] = {
   "pipetest",
   "sleeptest",
   "stridetest",
+  "cornercasetest",
 };
 
 int
@@ -317,8 +322,10 @@ exitthreadmain(void *arg)
       for (i = 0; i < 5000000; i++);
     }
   } else if ((int)arg == 2){
+    sleep(100);
     exit();
   }
+  printf(1, "never come...\n");
   thread_exit(0);
 
   return 0;
@@ -638,7 +645,7 @@ sleeptest(void)
 void*
 stridethreadmain(void *arg)
 {
-  int *flag = (int*)arg;
+  volatile int *flag = (int*)arg;
   int t;
   while(*flag){
     while(*flag == 1){
@@ -680,6 +687,7 @@ stridetest(void)
   flag = 1;
   sleep(500);
   flag = 0;
+
   for (i = 0; i < NUM_THREAD; i++){
     if (thread_join(threads[i], &retval) != 0){
       printf(1, "panic at thread_join\n");
@@ -702,3 +710,68 @@ stridetest(void)
 }
 
 // ============================================================================
+
+void*
+cornercasemain2(void *arg)
+{
+  int val = (int)arg;
+
+  sleep(200);
+  printf(1, "thread_exit...\n");
+  thread_exit((void *)(val*3));
+
+  return 0;
+}
+
+void*
+cornercasemain(void *arg)
+{
+  int val = (int)arg;
+  thread_t threads[NUM_THREAD];
+  int i;
+  void *retval;
+
+  for(i = 1; i < NUM_THREAD; i++){
+    if(thread_create(&threads[i], cornercasemain2, (void*)i) != 0){
+      printf(1, "panic at thread_create\n");
+      return 0;
+    }
+  }
+
+  printf(1, "thread_join!!!\n");
+  for (i = 1; i < NUM_THREAD; i++){
+    if (thread_join(threads[i], &retval) != 0 || (int)retval != i * 3 ){
+      printf(1, "panic at thread_join\n");
+      return 0;
+    }
+  }
+  printf(1,"\n");
+
+  sleep(200);
+  printf(1, "thread_exit...\n");
+  thread_exit((void *)(val*2));
+
+  return 0;
+}
+
+int
+cornercasetest(void)
+{
+  thread_t threads[NUM_THREAD];
+  int i = 0;
+  void *retval;
+
+  if (thread_create(&threads[0], cornercasemain, (void*)i) != 0){
+    printf(1, "panic at thread_create\n");
+    return -1;
+  }
+
+  printf(1, "thread_join!!!\n");
+
+  if (thread_join(threads[0], &retval) != 0 || (int)retval != i * 2 ){
+    printf(1, "panic at thread_join\n");
+    return -1;
+  }
+  printf(1,"\n");
+  return 0;
+}

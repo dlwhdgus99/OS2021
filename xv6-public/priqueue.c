@@ -23,8 +23,6 @@ pq_push(struct priority_queue *pq, struct proc *p)
   
   pq->heap[pq->count] = p;
 
-  //cprintf("push index: %d, pid: %d\n", pq->count, p->pid);
-
   int now = pq->count;
   int parent = (pq->count-1)/2;
 
@@ -54,8 +52,6 @@ pq_pop(struct priority_queue *pq)
 
   pq->count--;
   pq->heap[0] = pq->heap[pq->count];
-  
-  //cprintf("pop pid: %d", pq->heap[0]->pid);
 
   while(lchild < pq->count){
     if(pq->heap[target]->pass > pq->heap[lchild]->pass){
@@ -96,4 +92,17 @@ pq_select_pop(struct priority_queue *pq, int pid)
   }
 
   return p;
+}
+
+void
+init_mproc(struct proc *mproc)
+{
+  mproc->state = RUNNABLE;
+  mproc->pid = -1;
+  mproc->tick = -1;
+  mproc->pass = 0;
+  mproc->ticket = 100;
+  mproc->stride = LNUM/mproc->ticket;
+  mproc->ismlfq = 1;
+  mproc->mlfq_level = -1;
 }
