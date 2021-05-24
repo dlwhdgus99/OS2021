@@ -6,6 +6,7 @@
 #include "mmu.h"
 #include "proc.h"
 #include "elf.h"
+#include "thread.h"
 
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
@@ -184,6 +185,8 @@ inituvm(pde_t *pgdir, char *init, uint sz)
 {
   char *mem;
 
+  cprintf("inituvm\n");
+
   if(sz >= PGSIZE)
     panic("inituvm: more than a page");
   mem = kalloc();
@@ -318,20 +321,31 @@ clearpteu(pde_t *pgdir, char *uva)
 // Given a parent process's page table, create a copy
 // of it for a child.
 pde_t*
-copyuvm(pde_t *pgdir, uint sz)
+copyuvm(pde_t *pgdir, uint sz, uint *newsz)
 {
   pde_t *d;
   pte_t *pte;
-  uint pa, i, flags;
+  uint pa, i, j, flags;
   char *mem;
+
+  struct proc *curproc = myproc(); 
+  struct lwp_group *lwps = curproc->my_lwp_group;
+  struct lwp *lwp;
 
   if((d = setupkvm()) == 0)
     return 0;
-  for(i = 0; i < sz; i += PGSIZE){
+  for(i = 0, j = 0; i < sz; i += PGSIZE){
+    for(lwp = lwps->front; lwp; lwp = lwp->next){
+      if(lwp->proc != curproc && i == lwp->proc->ustack_va - 2*PGSIZE){
+	i += 2*PGSIZE;
+	if(i >= sz) continue;
+      }
+    }
     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
       panic("copyuvm: pte should exist");
     if(!(*pte & PTE_P))
-      panic("copyuvm: page not present");
+      continue;
+      //panic("copyuvm: page not present");
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -341,7 +355,13 @@ copyuvm(pde_t *pgdir, uint sz)
       kfree(mem);
       goto bad;
     }
+
+    j += PGSIZE;
   }
+  *newsz = i;
+
+  //cprintf("copyuvm: j, cnt = %d, %d\n", j, cnt);
+
   return d;
 
 bad:

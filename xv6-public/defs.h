@@ -10,6 +10,9 @@ struct sleeplock;
 struct stat;
 struct superblock;
 
+//sysproc.c
+void		sbrkinit(void);
+
 // bio.c
 void            binit(void);
 struct buf*     bread(uint, uint);
@@ -24,6 +27,7 @@ void            panic(char*) __attribute__((noreturn));
 
 // exec.c
 int             exec(char*, char**);
+void		einit(void);
 
 // file.c
 struct file*    filealloc(void);
@@ -188,7 +192,7 @@ int             deallocuvm(pde_t*, uint, uint);
 void            freevm(pde_t*);
 void            inituvm(pde_t*, char*, uint);
 int             loaduvm(pde_t*, char*, struct inode*, uint, uint);
-pde_t*          copyuvm(pde_t*, uint);
+pde_t*          copyuvm(pde_t*, uint, uint *);
 void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);

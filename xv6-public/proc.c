@@ -31,10 +31,9 @@ struct queue mid_queue;
 struct queue low_queue;
 
 struct node node[NPROC];
-int index;
 
 struct lwp_group lwp_groups[NPROC];
-struct lwp lwp[NPROC];
+struct lwp lwp_node[NPROC];
 
 struct proc mlfq_proc;
 struct priority_queue priqueue;
@@ -102,7 +101,7 @@ allocproc(void)
   int i = 0;
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++, i++)
     if(p->state == UNUSED){
-      index = i;
+      p->ptable_idx = i;
       goto found;
     }
 
@@ -141,12 +140,6 @@ found:
   return p;
 }
 
-void
-init_qcur(struct queue *q)
-{
-  q->cur = q->front;
-}
-
 //PAGEBREAK: 32
 // Set up first user process.
 void
@@ -154,7 +147,6 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
-
   struct mlfq *mlfq = &mlfqueue;
 
   //pointer to the 3 level queues.
@@ -162,10 +154,12 @@ userinit(void)
   struct queue *mqueue = &mid_queue;
   struct queue *lqueue = &low_queue;
 
+  struct lwp_group *lwps;
+
   //initialize 3 level queues.
-  initqueue(hqueue, 1,5);
-  initqueue(mqueue, 2,10);
-  initqueue(lqueue, 4,0);
+  initqueue(hqueue, 5,20);
+  initqueue(mqueue, 10,40);
+  initqueue(lqueue, 20,0);
 
   //initialize mlfq.
   initmlfq(mlfq, hqueue, mqueue, lqueue);
@@ -173,6 +167,7 @@ userinit(void)
   p = allocproc();
   
   initproc = p;
+
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
   inituvm(p->pgdir, _binary_initcode_start, (int)_binary_initcode_size);
@@ -199,8 +194,11 @@ userinit(void)
   p->tick = 0;
   p->mlfq_level = 0;
   p->ismlfq = 0;
-  createnode(p, &node[index]);
-  push(hqueue, &node[index]);
+
+  pushToMlfq(mlfq, &node[p->ptable_idx], p);
+
+  lwps = createLwpGroup(&lwp_groups[p->ptable_idx], &lwp_node[p->ptable_idx], p);
+  lwps->sz = PGSIZE;
 
   release(&ptable.lock);
 }
@@ -210,20 +208,30 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint oldsz, newsz = 0;
   struct proc *curproc = myproc();
+  struct lwp_group *lwps = curproc->my_lwp_group;
+  struct lwp *lwp;
 
-  sz = curproc->sz;
+  acquire(&ptable.lock);
+
+  oldsz = lwps->sz;
+
   if(n > 0){
-    if((sz = allocuvm(curproc->pgdir, sz, sz + n)) == 0)
+    if((newsz = allocuvm(curproc->pgdir, oldsz, oldsz + n)) == 0)
       return -1;
   } else if(n < 0){
-    if((sz = deallocuvm(curproc->pgdir, sz, sz + n)) == 0)
+    if((newsz = deallocuvm(curproc->pgdir, oldsz, oldsz + n)) == 0)
       return -1;
   }
-  curproc->sz = sz;
+
+  for(lwp = lwps->front; lwp; lwp = lwp->next)
+    lwp->proc->sz = newsz;
+  lwps->sz = newsz;
   switchuvm(curproc);
-  return 0;
+
+  release(&ptable.lock);
+  return oldsz;
 }
 
 // Create a new process copying p as the parent.
@@ -233,34 +241,25 @@ int
 fork(void)
 {
   int i, pid;
+  uint newsz;
   struct proc *np;
   struct proc *curproc = myproc();
-
   struct mlfq *mlfq = &mlfqueue;
+  struct lwp_group *lwps;
 
   // Allocate process.
   if((np = allocproc()) == 0){
     return -1;
   }
 
-  struct lwp_group *lwps = &lwp_groups[index];
-  initLwpGroup(lwps);
-
-  createLwpNode(np, &lwp[index]);
-  appendLwpNode(lwps, &lwp[index]);
-
-  np->my_lwp_group = lwps;
-
-  //cprintf("fork pid: %d\n", np->pid);
-
   // Copy process state from proc.
-  if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
+  if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz, &newsz)) == 0){
     kfree(np->kstack);
     np->kstack = 0;
     np->state = UNUSED;
     return -1;
   }
-  np->sz = lwps->sz = curproc->sz;
+
   np->parent = curproc;
   *np->tf = *curproc->tf;
 
@@ -284,19 +283,46 @@ fork(void)
   np->tick = 0;
   np->mlfq_level = 0;
   np->ismlfq = 0;
-  createnode(np, &node[index]);
-  push(mlfq->hqueue, &node[index]);
-  if(mlfq->hqueue->count == 1){
-    mlfq->hqueue->cur = mlfq->hqueue->front;
-  }
+  
+  pushToMlfq(mlfq, &node[np->ptable_idx], np);
 
-  //For lwp
-  createLwpNode(np, &lwp[index]);
-  appendLwpNode(lwps, &lwp[index]);
+  lwps = createLwpGroup(&lwp_groups[np->ptable_idx], &lwp_node[np->ptable_idx], np);
+
+  np->sz = newsz;
+  lwps->sz = newsz;
 
   release(&ptable.lock);
 
   return pid;
+}
+
+void
+popFromSchedulingQueue(struct proc *p)
+{
+  struct mlfq *mlfq = &mlfqueue;
+  struct priority_queue *pq = &priqueue;
+  struct proc *mproc = &mlfq_proc;
+  struct node *n;
+
+  if(p->ticket == 0){
+    if(p->mlfq_level == 0){
+      pop(mlfq->hqueue, p);
+    }
+    else if(p->mlfq_level == 1){
+      n = pop(mlfq->mqueue, p);
+      if(mlfq->mqueue->cur == n)
+        adjustCurForRoundRobin(mlfq->mqueue, n);
+    }
+    else{
+      n = pop(mlfq->lqueue, p);
+      if(mlfq->lqueue->cur == n)
+        adjustCurForRoundRobin(mlfq->lqueue, n);
+    }
+  }
+  else{
+    pq_select_pop(pq, p->pid);
+    mproc->ticket += p->ticket;
+  }
 }
 
 // Exit the current process.  Does not return.
@@ -307,6 +333,8 @@ exit(void)
 {
   struct proc *curproc = myproc();
   struct proc *p;
+  struct lwp_group *lwps = curproc->my_lwp_group;
+  struct lwp *lwp;
   int fd;
 
   if(curproc == initproc)
@@ -316,68 +344,53 @@ exit(void)
   for(fd = 0; fd < NOFILE; fd++){
     if(curproc->ofile[fd]){
       fileclose(curproc->ofile[fd]);
-      curproc->ofile[fd] = 0;
+      for(lwp = lwps->front; lwp; lwp = lwp->next){
+        lwp->proc->ofile[fd] = 0;
+      }
     }
   }
 
   begin_op();
   iput(curproc->cwd);
   end_op();
-  curproc->cwd = 0;
+  for(lwp = lwps->front; lwp; lwp = lwp->next){
+    lwp->proc->cwd = 0;
+  }
 
   acquire(&ptable.lock);
-
   // Parent might be sleeping in wait().
   wakeup1(curproc->parent);
 
   // Pass abandoned children to init.
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    if(p->parent == curproc){
-      p->parent = initproc;
-      if(p->state == ZOMBIE)
-        wakeup1(initproc);
+  //cprintf("lwp group count: %d\n", lwps->count);
+  for(lwp = lwps->front; lwp; lwp = lwp->next){
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->parent == lwp->proc){
+        p->parent = initproc;
+        if(p->state == ZOMBIE)
+          wakeup1(initproc);
+      }
     }
   }
 
+  for(lwp = lwps->front; lwp; lwp = lwp->next){
+    lwp->proc->state = ZOMBIE;
+  }
   // Jump into the scheduler, never to return.
-  curproc->state = ZOMBIE;
   sched();
   panic("zombie exit");
 }
 
-void popFromSchedulingQueue(struct proc *p)
+int
+isAllZombie(struct lwp_group *lwps)
 {
-  struct mlfq *mlfq = &mlfqueue;
-  struct priority_queue *pq = &priqueue;
-  struct proc *mproc = &mlfq_proc;
+  struct lwp *lwp;
 
-  if(p->ticket == 0){
-    if(p->mlfq_level == 0){
-      pop(mlfq->hqueue, p);
-    }
-    else if(p->mlfq_level == 1){
-      pop(mlfq->mqueue, p);
-      if(mlfq->mqueue->cur->next == 0){
-        mlfq->mqueue->cur = mlfq->mqueue->front;
-      }
-      else{
-        mlfq->mqueue->cur = mlfq->mqueue->cur->next;
-      }
-    }
-    else{
-      pop(mlfq->lqueue, p);
-      if(mlfq->lqueue->cur->next == 0){
-        mlfq->lqueue->cur = mlfq->lqueue->front;
-      }
-      else{
-        mlfq->lqueue->cur = mlfq->lqueue->cur->next;
-      }
-    }
+  for(lwp = lwps->front; lwp; lwp = lwp->next){
+    if(lwp->proc->state != ZOMBIE)
+      return 0;
   }
-  else{
-    pq_select_pop(pq, p->pid);
-    mproc->ticket += p->ticket;
-  }
+  return 1;
 }
 
 // Wait for a child process to exit and return its pid.
@@ -386,31 +399,54 @@ int
 wait(void)
 {
   struct proc *p;
-  int havekids, pid;
+  int havekids,  pid = 0;
   struct proc *curproc = myproc();
+  struct lwp_group *lwps;
+  struct lwp *lwp;
 
   acquire(&ptable.lock);
   for(;;){
     // Scan through table looking for exited children.
     havekids = 0;
+
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->parent != curproc)
         continue;
       havekids = 1;
-      if(p->state == ZOMBIE){
+      lwps = p->my_lwp_group;
+
+      if(isAllZombie(lwps)){
         // Found one.
 
-	popFromSchedulingQueue(p);	
+	for(lwp = lwps->front; lwp; lwp = lwp->next){
+	  p = lwp->proc;
 
-        pid = p->pid;
-        kfree(p->kstack);
-        p->kstack = 0;
-        freevm(p->pgdir);
-        p->pid = 0;
-        p->parent = 0;
-        p->name[0] = 0;
-        p->killed = 0;
-        p->state = UNUSED;
+	  if(p->ismaster){
+	    popFromSchedulingQueue(p);
+	  }
+	  p->ticket = 0;
+	  p->sz = 0;
+          p->ustack_va = 0;
+
+	  removeLwpNode(lwps, p->pid);
+          p->my_lwp_group = 0;
+
+          pid = p->pid;
+          kfree(p->kstack);
+          p->kstack = 0;
+          p->pid = 0;
+          p->parent = 0;
+          p->name[0] = 0;
+          p->killed = 0;
+          p->state = UNUSED;
+	}
+	lwps->sz = 0;
+	lwps->quantum = 0;
+	lwps->ticket = 0;
+	freevm(p->pgdir);
+	for(lwp = lwps->front; lwp; lwp = lwp->next){
+	  p->pgdir = 0;
+	}
       
         release(&ptable.lock);
         return pid;
@@ -441,78 +477,83 @@ set_cpu_share(int share)
   struct mlfq *mlfq = &mlfqueue;
   struct proc *mproc = &mlfq_proc;
   struct priority_queue *pq = &priqueue;
+  struct lwp_group *lwps = curproc->my_lwp_group;
+  struct lwp *lwp;
+  struct proc *master;
+  struct node *n;
  
   if(mproc->ticket - share < 20){
     return -1;
   }
 
   acquire(&ptable.lock);
-  if(curproc->mlfq_level == 0){
-    pop(mlfq->hqueue, curproc);
+
+  for(lwp = lwps->front; lwp; lwp = lwp->next)
+    if(lwp->proc->ismaster)
+      break;
+  master = lwp->proc; 
+
+  if(master->mlfq_level == 0){
+    pop(mlfq->hqueue, master);
   }
-  else if(curproc->mlfq_level == 1){
-    pop(mlfq->mqueue, curproc);
+  else if(master->mlfq_level == 1){
+    n = pop(mlfq->mqueue, master);
+    if(mlfq->mqueue->cur == n)
+      adjustCurForRoundRobin(mlfq->mqueue, n);
   }
   else{
-    pop(mlfq->lqueue, curproc);
+    n = pop(mlfq->lqueue, master);
+    if(mlfq->lqueue->cur == n)
+      adjustCurForRoundRobin(mlfq->lqueue, n);
   }
   mproc->ticket -= share;
   mproc->stride = LNUM/mproc->ticket;
 
-  curproc->ticket = share;
-  curproc->stride = LNUM/curproc->ticket;
-  curproc->pass = pq->heap[0]->pass;
-  curproc->ismlfq = 0;
+  lwps->ticks = 0;
+  lwps->quantum = 5;
+  lwps->ticket = master->ticket = share;
+  lwps->stride = master->stride = LNUM/master->ticket;
+  lwps->pass = master->pass = pq->heap[0]->pass;
+  master->ismlfq = 0;
 
-  pq_push(pq, curproc); 
+  pq_push(pq, master); 
 
   release(&ptable.lock);
   return 0;
 }
 
 int
-chkquant(struct queue *q)
-{
-  struct proc *p = myproc();
-
-  if((p->tick != 0) && ((p->tick) % q->quantum == 0)){
-    if(q->cur->next == 0){
-      q->cur = q->front;
-    }
-    else{
-      q->cur = q->cur->next;
-    }
-    return 1;
-  }
-  return 0;
-}
-
-int
 chkallot(struct queue *now,  struct queue *low)
 {
-  struct proc *p = myproc();  
-  struct node *candidate_cur = now->cur->next;
- 
-  if(p->tick == now->allotment){
-    struct node *temp = (struct node *)pop(now, p);
-    if(now->cur == temp){
-      if(candidate_cur == 0){
-	now->cur = now->front;
-      }
-      else{
-	now->cur = candidate_cur;
+  struct proc *p;  
+  struct lwp_group *lwps = myproc()->my_lwp_group;
+  struct lwp *lwp;
+  struct node *n;
+
+  if(lwps->ticks >= lwps->allotment){
+    //find master thread.
+    for(lwp = lwps->front; lwp; lwp = lwp->next){
+      if(lwp->proc->ismaster){
+        break;
       }
     }
-    if(temp == 0){
-      cprintf("chkallot!!\n");
-    }
-    temp->next = 0;
-    push(low, temp);
-    if(low->count == 1){
+    p = lwp->proc;
+
+    n = pop(now, p);
+    if(now->cur == n)
+      adjustCurForRoundRobin(now, n);
+
+    push(low, n);
+    if(low->count == 1)
       init_qcur(low);
+
+    lwps->ticks = 0;
+    lwps->quantum = low->quantum;
+    lwps->allotment = low->allotment;
+    for(lwp = lwps->front; lwp; lwp = lwp->next){
+      lwp->proc->mlfq_level++;
     }
-    p->tick = 0;
-    p->mlfq_level++;
+
     return 1;
   }
   return 0;
@@ -524,45 +565,56 @@ chkboost()
   struct node *n;
   struct proc *p;
   struct mlfq *mlfq = &mlfqueue;
+  struct lwp_group *lwps;
 
-  if(mlfq->totalticks == 100){
-    for(n = mlfq->hqueue->front; n != 0; n = n->next){
+  if(mlfq->totalticks >= 200){
+
+    if(mlfq->mqueue->count > 0){
+      for(n = mlfq->mqueue->front; n; n = n->next){
+	lwps = n->proc->my_lwp_group;
+	lwps->quantum = mlfq->hqueue->quantum;
+	lwps->allotment = mlfq->hqueue->allotment;
+	lwps->ticks = 0;
+      }
+    }
+
+    if(mlfq->lqueue->count > 0){
+      for(n = mlfq->lqueue->front; n; n = n->next){
+        lwps = n->proc->my_lwp_group;
+        lwps->quantum = mlfq->hqueue->quantum;
+        lwps->allotment = mlfq->hqueue->allotment;
+        lwps->ticks = 0;
+      }
+    }
+
+    for(n = mlfq->hqueue->front; n; n = n->next){
       p = n->proc;
       p->tick = 0;
     }
-    for(n = mlfq->mqueue->front; n != 0; n = n->next){
+    for(n = mlfq->mqueue->front; n; n = n->next){
       p = n->proc;
       struct node *temp = (struct node *)pop(mlfq->mqueue, p);
       push(mlfq->hqueue, temp);
+      if(mlfq->mqueue->cur == n)
+	adjustCurForRoundRobin(mlfq->mqueue, n);
       p->tick = 0;
       p->mlfq_level = 0;
     }
-    for(n = mlfq->lqueue->front; n != 0; n = n->next){
+    for(n = mlfq->lqueue->front; n; n = n->next){
       p = n->proc;
       struct node *temp = (struct node *)pop(mlfq->lqueue, p);
       push(mlfq->hqueue, temp);
+      if(mlfq->lqueue->cur == n)
+        adjustCurForRoundRobin(mlfq->lqueue, n);
+
       p->tick = 0;
       p->mlfq_level = 0;
     }
     mlfq->totalticks = 0;
+
     return 1;
   }
   return 0;
-}
-
-void
-init_mproc(void)
-{
-  struct proc *mproc = &mlfq_proc;
-  
-  mproc->state = RUNNABLE;
-  mproc->pid = -1;
-  mproc->tick = -1;
-  mproc->pass = 0;
-  mproc->ticket = 100;
-  mproc->stride = LNUM/mproc->ticket;
-  mproc->ismlfq = 1;
-  mproc->mlfq_level = -1;
 }
 
 void
@@ -575,35 +627,56 @@ stride_scheduling(void)
   int idx = 0;
   struct proc *p;  
   struct cpu *c = mycpu();
+  struct lwp_group *lwps;
+  struct lwp *lwp;
+  struct proc *master;
 
   for(;;){
-    p = pq_pop(pq);
-    while(p->state != RUNNABLE){
-      temp_proc[idx++] = p;
+  idx = 0;
+    while(1){
       p = pq_pop(pq);
+
+      if(p->ismlfq){
+	p->pass += p->stride;
+	for(int i = 0; i < idx; i++)
+	  pq_push(pq, temp_proc[i]);
+	pq_push(pq, p);
+	return;
+      }
+
+      if(p->ismlfq){
+	p->pass += p->stride;
+	pq_push(pq, p);
+	return;
+      }
+
+      lwps = p->my_lwp_group;
+      if((lwp = findNextLwpToRun(lwps)) == 0){
+	temp_proc[idx++] = p;
+        continue;
+      }
+      master = p;
+      break;
     }
-    for(int i = 0; i < idx; i++){
+
+    for(int i = 0; i < idx; i++)
       pq_push(pq, temp_proc[i]);
-    }
-    
-//    p = pq_pop(pq);   
 
-    if(p->ismlfq == 1){
-      p->pass += p->stride;
-      pq_push(pq, p);
-      return ;
-    }
-
+    p = lwp->proc;
+    lwps->cur = lwp;
     c->proc = p;
+
+    lwps->ticks++;
+    master->pass += master->stride;
+    lwps->pass += lwps->stride;
+    pq_push(pq, master);
+
     switchuvm(p);
     p->state = RUNNING;
     swtch(&(c->scheduler), p->context);
     switchkvm();
+
     c->proc = 0; 
-    if(p->pid != 0){
-      p->pass += p->stride;
-      pq_push(pq, p);
-    }
   }
 }
 
@@ -615,7 +688,6 @@ stride_scheduling(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
-
 void
 scheduler(void)
 {
@@ -633,11 +705,14 @@ scheduler(void)
   struct queue *mqueue = &mid_queue;
   struct queue *lqueue = &low_queue;
 
+  struct lwp_group *lwps;
+  struct lwp *lwp;
+
   //initialize priority queue(for stride scheduling)
   init_priqueue(pq);
 
   //initialize and push mlfq process(not a real process).
-  init_mproc();
+  init_mproc(mproc);
   pq_push(pq, mproc);
 
   for(;;){
@@ -647,34 +722,34 @@ scheduler(void)
 
     //High priority q
     int all_unrunnable = 1;
+    int unrunnable_count = 0;
 
     //cprintf("hqueue count : %d\n", hqueue->count);
    
-    for(n = hqueue->front; n != 0; n = n->next){
+    for(n = hqueue->front; n; n = n->next){
       p = n->proc;
-      if(p->state != RUNNABLE){
+      lwps = p->my_lwp_group;
+      
+      //find runnable lwp
+      if((lwp = findNextLwpToRun(lwps)) == 0)
 	continue;
-      }
 
-      //cprintf("hqueue count: %d\n", hqueue->count);
       all_unrunnable = 0;
 
-      hqueue->cur = n;
+      p = lwp->proc;
+      lwps->cur = lwp;    
       c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-      
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
 
       mlfq->totalticks++;
-      if(p->pid != 0){
-	p->tick++;
-	if(chkboost() == 0){
-	  chkallot(hqueue, mqueue);
-	}
-      }
-      chkboost();
+      lwps->ticks++;
+
+      if(chkboost() == 0)
+	chkallot(hqueue, mqueue);
+
+      switchuvm(p);
+      p->state = RUNNING;
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
 
       c->proc = 0;
       
@@ -690,37 +765,44 @@ scheduler(void)
       continue;
     }
 
-    //cprintf("mqueue count : %d\n", mqueue->count);
-
     //Middle priority q
     all_unrunnable = 1;
-    for(n = mqueue->cur; n != 0; n = n->next){
+    unrunnable_count = 0;
+
+    for(n = mqueue->cur; ; ){
+
+      if(unrunnable_count > mqueue->count || mqueue->count == 0)
+	break;
+
+      n = n->next;
+      if(n == 0) 
+	n = mqueue->front;
+
       p = n->proc;
-      if(p->state != RUNNABLE){
+      lwps = p->my_lwp_group;
+
+      if((lwp = findNextLwpToRun(lwps)) == 0){
+	unrunnable_count++;
 	continue;
       }
-      //cprintf("mqueue count: %d\n", mqueue->count);
-      //cprintf("thread %d running\n", p->pid);
+
       all_unrunnable = 0;
-      
+
+      p = lwp->proc;
+      lwps->cur = lwp;
       mqueue->cur = n;
-      c->proc = p;    
-  
+      c->proc = p;
+
+      mlfq->totalticks++;
+      lwps->ticks++;
+
+      if(chkboost() == 0)
+        chkallot(mqueue, lqueue);
+
       switchuvm(p);
       p->state = RUNNING;
       swtch(&(c->scheduler), p->context);
       switchkvm();
-
-      mlfq->totalticks++;
-      if(p->pid != 0){
-        p->tick++;
-        if(chkboost() == 0){
-          if(chkallot(mqueue, lqueue) == 0){
-	    chkquant(mqueue);
-	  }
-        }
-      }
-      chkboost();
 
       c->proc = 0;
        
@@ -729,9 +811,6 @@ scheduler(void)
       }
       break;
     }
-    if(n == 0){
-      mqueue->cur = mqueue->front;
-    }
     
     //determine weather go down or not
     if((all_unrunnable == 0) && (mqueue->count > 0)){
@@ -739,46 +818,51 @@ scheduler(void)
       continue;
     }
 
-    //cprintf("lqueue count: %d\n", lqueue->count);
     //Low priority q
     all_unrunnable = 1;
+    unrunnable_count = 0;
 
-    for(n = lqueue->cur; n != 0; n = n->next){
+    for(n = lqueue->cur; ;){
+
+      if(unrunnable_count > lqueue->count || lqueue->count == 0)
+	break;
+
+      n = n->next;
+      if(n == 0)
+        n = lqueue->front;
+
       p = n->proc;
-      if(p->state != RUNNABLE){
+      lwps = p->my_lwp_group;
+      if((lwp = findNextLwpToRun(lwps)) == 0){
+	unrunnable_count++;
 	continue;
       }
-      //cprintf("lqueue count: %d\n", lqueue->count);
-      //cprintf("thread %d running\n", p->pid);
+
       all_unrunnable = 0;
 
+      p = lwp->proc;
+      lwps->cur = lwp;
       lqueue->cur = n;
       c->proc = p;
+
+      mlfq->totalticks++;
+      lwps->ticks++;
+
+      chkboost();
 
       switchuvm(p);
       p->state = RUNNING;
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
-      mlfq->totalticks++;
-      if(p->pid != 0){
-	p->tick++;
-	if(chkboost() == 0){
-	  chkquant(lqueue);
-	}
-      }
-      chkboost();
       c->proc = 0;
- 
+
       //stride scheduling
       if(pq->count > 1){
         stride_scheduling(); 
       }     
       break;
     } 
-    if(n == 0){
-      lqueue->cur = lqueue->front;
-    }
 
     if(pq->count > 1){
       stride_scheduling();
@@ -798,18 +882,55 @@ void
 sched(void)
 {
   int intena;
-  struct proc *p = myproc();
+  struct cpu *c = mycpu();
+  struct proc *curproc = myproc();
+  struct mlfq *mlfq = &mlfqueue;
+  struct lwp_group *lwps = curproc->my_lwp_group;
+  struct lwp *lwp;
 
   if(!holding(&ptable.lock))
     panic("sched ptable.lock");
   if(mycpu()->ncli != 1)
     panic("sched locks");
-  if(p->state == RUNNING)
+  if(curproc->state == RUNNING)
     panic("sched running");
   if(readeflags()&FL_IF)
     panic("sched interruptible");
-  intena = mycpu()->intena;
-  swtch(&p->context, mycpu()->scheduler);
+
+  intena = mycpu()->intena;  
+
+  if(lwps->ticks == 0 || (lwps->ticks % lwps->quantum) != 0){
+    if((lwp = findNextLwpToRun(lwps)) == 0)
+      swtch(&(curproc->context), mycpu()->scheduler);
+    else{
+      lwps->cur = lwp;
+      c->proc = lwp->proc;
+      lwp->proc->state = RUNNING;
+      lwps->ticks++;
+
+      if(lwps->ticket == 0) mlfq->totalticks++;
+      if(curproc != lwp->proc){
+	//cprintf("curproc: %d | newproc: %d\n", curproc->pid, lwp->proc->pid);
+        pushcli();
+        mycpu()->gdt[SEG_TSS] = SEG16(STS_T32A, &mycpu()->ts,
+                                sizeof(mycpu()->ts)-1, 0);
+        mycpu()->gdt[SEG_TSS].s = 0;
+        mycpu()->ts.ss0 = SEG_KDATA << 3;
+        mycpu()->ts.esp0 = (uint)lwp->proc->kstack + KSTACKSIZE;
+        mycpu()->ts.iomb = (ushort) 0xFFFF;
+        ltr(SEG_TSS << 3);
+	//void * before = mycpu()->ts.cr3;
+        lcr3(V2P(lwp->proc->pgdir));  // switch to process's address space
+	//void * after = mycpu()->ts.cr3;
+	
+        popcli();
+        swtch(&(curproc->context), lwp->proc->context);
+      }
+    }
+  }
+  else{
+    swtch(&(curproc->context), mycpu()->scheduler);
+  }
   mycpu()->intena = intena;
 }
 
@@ -873,16 +994,13 @@ sleep(void *chan, struct spinlock *lk)
   p->chan = chan;
   p->state = SLEEPING;
   
-  //cprintf("\n---------------------\n");
-  //cprintf("pid %d goes to sleep\n", p->pid);
-  //cprintf("---------------------\n");
-
   sched();
 
   // Tidy up.
   p->chan = 0;
 
   // Reacquire original lock.
+  
   if(lk != &ptable.lock){  //DOC: sleeplock2
     release(&ptable.lock);
     acquire(lk);
@@ -918,14 +1036,19 @@ int
 kill(int pid)
 {
   struct proc *p;
+  struct lwp_group *lwps;
+  struct lwp *lwp;
 
   acquire(&ptable.lock);
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->pid == pid){
-      p->killed = 1;
-      // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
-        p->state = RUNNABLE;
+      lwps = p->my_lwp_group;
+      for(lwp = lwps->front; lwp; lwp = lwp->next){
+        lwp->proc->killed = 1;
+        // Wake process from sleep if necessary.
+        if(lwp->proc->state == SLEEPING)
+          lwp->proc->state = RUNNABLE;
+      }
       release(&ptable.lock);
       return 0;
     }
@@ -983,18 +1106,19 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
 {
   struct proc *nt;
   struct proc *curproc = myproc();
-  struct mlfq *mlfq = &mlfqueue;
 
   uint sz, sp, ustack[3];
   pde_t *pgdir;
   uint a, newsz, oldsz;
 
   struct lwp_group *lwps = curproc->my_lwp_group;
+  struct lwp *lwp;
 
   if((nt = allocproc()) == 0){
     cprintf("allocproc panic\n");
     return -1;
   }
+
   *thread = nt->pid;
 
   nt->parent = curproc->parent;
@@ -1007,7 +1131,6 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
   safestrcpy(nt->name, curproc->name, sizeof(curproc->name));
 
   //allocate user stack.
-
   sz = PGROUNDUP(lwps->sz);
   pgdir = curproc->pgdir;
   oldsz = sz;
@@ -1022,6 +1145,7 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
       pte1 = walkpgdir(pgdir, (char*)(i-PGSIZE), 0);
       pte2 = walkpgdir(pgdir, (char*)(i-2*PGSIZE), 0);
       if(!(*pte1 & PTE_P) && !(*pte2 & PTE_P)){
+	cprintf("kernbase overflow...found..\n");
 	allocuvm(pgdir, i-2*PGSIZE, i);
 	sz = oldsz;
 	nt->ustack_va = i;
@@ -1056,27 +1180,26 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
   }
 
   acquire(&ptable.lock);
-  
-  nt->pgdir = curproc->pgdir = pgdir;
-  nt->sz = curproc->sz = sz;
+
+  curproc->pgdir = pgdir;
+  nt->pgdir = pgdir;
   nt->tf->esp = sp;
  
   //for scheduling
   nt->state = RUNNABLE;
-  nt->tick = 0;
   nt->mlfq_level = 0;
   nt->ismlfq = 0;
-  createnode(nt, &node[index]);
-  push(mlfq->hqueue, &node[index]);
-  if(mlfq->hqueue->count == 1){
-    mlfq->hqueue->cur = mlfq->hqueue->front;
-  }
 
   //for lwp management
-  createLwpNode(nt, &lwp[index]);
-  appendLwpNode(lwps, &lwp[index]);
+  createLwpNode(nt, &lwp_node[nt->ptable_idx]);
+  appendLwpNode(lwps, &lwp_node[nt->ptable_idx]);
   nt->my_lwp_group = lwps;
+
   lwps->sz = sz;
+  for(lwp = lwps->front; lwp; lwp = lwp->next)
+    lwp->proc->sz = sz;
+
+  nt->ismaster = 0;
 
   release(&ptable.lock);
 
@@ -1091,22 +1214,25 @@ thread_exit(void *retval)
   int fd;
   struct lwp_group *lwps = curproc->my_lwp_group;
 
+  //cprintf("thread_exit\n");
+
   if(curproc == initproc)
     panic("init exiting");
 
   // Close all open files.
-  if(lwps->count == 1){
-    for(fd = 0; fd < NOFILE; fd++){
-      if(curproc->ofile[fd]){
+  for(fd = 0; fd < NOFILE; fd++){
+    if(curproc->ofile[fd]){
+      if(lwps->count == 1)
         fileclose(curproc->ofile[fd]);
-        curproc->ofile[fd] = 0;
-      }
+      curproc->ofile[fd] = 0;
     }
+  }
+  if(lwps->count == 1){
     begin_op();
     iput(curproc->cwd);
     end_op();
-    curproc->cwd = 0;
   }
+  curproc->cwd = 0;
 
   acquire(&ptable.lock);
   curproc->thread_retval = retval;
@@ -1127,13 +1253,38 @@ thread_exit(void *retval)
   panic("zombie exit");	
 }
 
+void
+adjustUvmSize(struct proc *p)
+{
+  struct lwp_group *lwps = p->my_lwp_group;
+  struct lwp *lwp;
+  uint newsz = 0;
+
+  if(p->ustack_va == p->sz){
+    newsz = PGROUNDUP(p->sz);
+    pte_t *pte;
+    for(; newsz > p->static_size; newsz -= PGSIZE){
+      pte = walkpgdir(p->pgdir, (char *)newsz, 0);
+      if(*pte & PTE_P) break;
+    }
+    newsz += PGSIZE;
+    lwps->sz = newsz;
+    for(lwp = lwps->front; lwp; lwp = lwp->next)
+      lwp->proc->sz = newsz;
+  }
+}
+
 int
 thread_join(thread_t thread, void **retval)
 {
   struct proc *p;
   struct proc *channel = 0;
   struct proc *curproc = myproc();
+  struct mlfq *mlfq = &mlfqueue;
   struct lwp_group *lwps;
+  struct priority_queue *pq = &priqueue;
+
+  //cprintf("thread_join\n");
 
   acquire(&ptable.lock);
   for(;;){
@@ -1145,24 +1296,25 @@ thread_join(thread_t thread, void **retval)
       lwps = p->my_lwp_group;
       if(p->state == ZOMBIE){
         // Found one.
-        popFromSchedulingQueue(p);	
+
+	if(p->ismaster){
+          popFromSchedulingQueue(p);	
+	  if(lwps->count > 1){
+	    struct lwp *newMaster = selectOtherMaster(p);
+	    if(newMaster->proc->ticket == 0)
+              pushToMlfq(mlfq, &node[newMaster->proc->ptable_idx], 
+	      newMaster->proc); 
+	    else
+	      pq_push(pq, newMaster->proc); 
+	  }
+	}
 
 	deallocuvm(p->pgdir, p->ustack_va, p->ustack_va-2*PGSIZE);
-	
-	if(p->ustack_va == p->sz){
-	  uint newsz = PGROUNDUP(p->sz);
-	  pte_t *pte;
-	  for(; newsz > p->static_size; newsz -= PGSIZE){
-	    pte = walkpgdir(p->pgdir, (char *)newsz, 0);
-	    if(*pte & PTE_P) break;
-	  }
-	  newsz += PGSIZE;
-	  lwps->sz = newsz;
-	}
+	adjustUvmSize(p);
 	p->ustack_va = 0;
 
 	//pop from lwp group.
-	removeLwpNode(lwps, p->pid);	
+	removeLwpNode(lwps, p->pid);
 	p->my_lwp_group = 0;
 
         kfree(p->kstack);
@@ -1171,6 +1323,7 @@ thread_join(thread_t thread, void **retval)
         p->parent = 0;
         p->name[0] = 0;
         p->killed = 0;
+	p->pgdir = 0;
 
 	*retval = p->thread_retval;
 	p->thread_retval = 0;

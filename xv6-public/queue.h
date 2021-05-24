@@ -29,4 +29,10 @@ push(struct queue *q, struct node *n);
 struct node *
 pop(struct queue *q, struct proc *p);
 
+void
+init_qcur(struct queue *q);
+
+void
+adjustCurForRoundRobin(struct queue *q, struct node *n);
+
 #endif

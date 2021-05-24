@@ -29,10 +29,11 @@ createnode(struct proc *p, struct node *n)
 void
 push(struct queue *q, struct node *n)
 {
-  //n->next = 0;
+  n->next = 0;
   if(q->count == 0)
   {
     q->front = n;
+    q->cur = n;
   }
   else
   {
@@ -76,7 +77,8 @@ pop(struct queue *q, struct proc *p)
       if(node->next->proc->pid == p->pid){
         struct node *ret = node->next;
         node->next = node->next->next;
-        if(node->next == 0) q->back = node;
+        if(node->next == 0)
+	  q->back = node;
         q->count--;
         return ret;
       }
@@ -85,4 +87,19 @@ pop(struct queue *q, struct proc *p)
     }
     return 0;
   }
+}
+
+void
+init_qcur(struct queue *q)
+{
+  q->cur = q->front;
+}
+
+void
+adjustCurForRoundRobin(struct queue *q, struct node *n)
+{
+  if(n->next == 0)
+    q->cur = q->front;
+  else
+    q->cur = n->next;
 }

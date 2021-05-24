@@ -20,4 +20,7 @@ pq_pop(struct priority_queue *pq);
 struct proc *
 pq_select_pop(struct priority_queue *pq, int pid);
 
+void
+init_mproc(struct proc *mproc);
+
 #endif

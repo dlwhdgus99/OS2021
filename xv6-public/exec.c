@@ -6,10 +6,19 @@
 #include "defs.h"
 #include "x86.h"
 #include "elf.h"
+#include "spinlock.h"
 #include "queue.h"
 #include "mlfq.h"
+#include "thread.h"
 
 extern struct mlfq mlfqueue;
+struct spinlock lock;
+
+void
+einit(void)
+{
+  initlock(&lock, "exec");  
+}
 
 int
 exec(char *path, char **argv)
@@ -23,6 +32,11 @@ exec(char *path, char **argv)
   pde_t *pgdir, *oldpgdir;
   struct proc *curproc = myproc();
 
+  struct lwp_group *lwps = curproc->my_lwp_group;
+  struct lwp *lwp;
+  
+  einit();
+ 
   begin_op();
 
   if((ip = namei(path)) == 0){
@@ -32,6 +46,16 @@ exec(char *path, char **argv)
   }
   ilock(ip);
   pgdir = 0;
+
+  acquire(&lock);
+  
+  for(lwp = lwps->front; lwp; lwp = lwp->next){
+    if(lwp->proc != curproc){
+      lwp->proc->state = ZOMBIE;
+    }
+  }
+
+  release(&lock);
 
   // Check ELF header
   if(readi(ip, (char*)&elf, 0, sizeof(elf)) != sizeof(elf))
@@ -101,8 +125,13 @@ exec(char *path, char **argv)
 
   // Commit to the user image.
   oldpgdir = curproc->pgdir;
-  curproc->pgdir = pgdir;
-  curproc->sz = sz;
+
+  for(lwp = lwps->front; lwp; lwp = lwp->next){
+    lwp->proc->pgdir = pgdir;
+    lwp->proc->sz = sz;
+  }
+  lwps->sz = sz;
+  curproc->ustack_va = sz;
   curproc->tf->eip = elf.entry;  // main
   curproc->tf->esp = sp;
   switchuvm(curproc);
