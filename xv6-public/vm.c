@@ -249,10 +249,6 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
     }
   }
 
-//  if(newsz - oldsz == 2*PGSIZE && p->ustack == 0){
-//    p->ustack = mem;
-//  }
-
   return newsz;
 }
 
