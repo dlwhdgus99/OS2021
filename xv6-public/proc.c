@@ -362,7 +362,6 @@ exit(void)
   wakeup1(curproc->parent);
 
   // Pass abandoned children to init.
-  //cprintf("lwp group count: %d\n", lwps->count);
   for(lwp = lwps->front; lwp; lwp = lwp->next){
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->parent == lwp->proc){
@@ -644,12 +643,6 @@ stride_scheduling(void)
 	return;
       }
 
-      if(p->ismlfq){
-	p->pass += p->stride;
-	pq_push(pq, p);
-	return;
-      }
-
       lwps = p->my_lwp_group;
       if((lwp = findNextLwpToRun(lwps)) == 0){
 	temp_proc[idx++] = p;
@@ -884,6 +877,7 @@ sched(void)
   int intena;
   struct cpu *c = mycpu();
   struct proc *curproc = myproc();
+  struct proc *mproc = &mlfq_proc;
   struct mlfq *mlfq = &mlfqueue;
   struct lwp_group *lwps = curproc->my_lwp_group;
   struct lwp *lwp;
@@ -908,22 +902,15 @@ sched(void)
       lwp->proc->state = RUNNING;
       lwps->ticks++;
 
-      if(lwps->ticket == 0) mlfq->totalticks++;
+      //come from mlfq.
+      if(lwps->ticket == 0){
+	 mlfq->totalticks++;
+        if(lwps->ticks > 5 && lwps->ticks % 5 == 0) 
+	  mproc->pass += mproc->stride;
+      }
+
       if(curproc != lwp->proc){
-	//cprintf("curproc: %d | newproc: %d\n", curproc->pid, lwp->proc->pid);
-        pushcli();
-        mycpu()->gdt[SEG_TSS] = SEG16(STS_T32A, &mycpu()->ts,
-                                sizeof(mycpu()->ts)-1, 0);
-        mycpu()->gdt[SEG_TSS].s = 0;
-        mycpu()->ts.ss0 = SEG_KDATA << 3;
-        mycpu()->ts.esp0 = (uint)lwp->proc->kstack + KSTACKSIZE;
-        mycpu()->ts.iomb = (ushort) 0xFFFF;
-        ltr(SEG_TSS << 3);
-	//void * before = mycpu()->ts.cr3;
-        lcr3(V2P(lwp->proc->pgdir));  // switch to process's address space
-	//void * after = mycpu()->ts.cr3;
-	
-        popcli();
+	switchuvm(lwp->proc);
         swtch(&(curproc->context), lwp->proc->context);
       }
     }
@@ -1253,6 +1240,8 @@ thread_exit(void *retval)
   panic("zombie exit");	
 }
 
+//if deallocated stack is at the top of the user space, 
+//update the sz variable.
 void
 adjustUvmSize(struct proc *p)
 {
