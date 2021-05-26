@@ -879,6 +879,7 @@ sched(void)
   struct proc *curproc = myproc();
   struct proc *mproc = &mlfq_proc;
   struct mlfq *mlfq = &mlfqueue;
+  struct priority_queue *pq = &priqueue;
   struct lwp_group *lwps = curproc->my_lwp_group;
   struct lwp *lwp;
 
@@ -905,8 +906,11 @@ sched(void)
       //come from mlfq.
       if(lwps->ticket == 0){
 	 mlfq->totalticks++;
-        if(lwps->ticks > 5 && lwps->ticks % 5 == 0) 
+        if(lwps->ticks > 5 && lwps->ticks % 5 == 0){
+	  pq_select_pop(pq, mproc->pid);
 	  mproc->pass += mproc->stride;
+	  pq_push(pq, mproc);
+	}
       }
 
       if(curproc != lwp->proc){
