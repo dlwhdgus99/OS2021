@@ -136,13 +136,12 @@ filewrite(struct file *f, char *addr, int n)
       int n1 = n - i;
       if(n1 > max)
         n1 = max;
-
-      begin_op();
+      
+      check_log_overflow(n1);
       ilock(f->ip);
       if ((r = writei(f->ip, addr + i, f->off, n1)) > 0)
         f->off += r;
       iunlock(f->ip);
-      end_op();
 
       if(r < 0)
         break;
@@ -154,4 +153,3 @@ filewrite(struct file *f, char *addr, int n)
   }
   panic("filewrite");
 }
-
