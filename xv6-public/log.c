@@ -42,6 +42,7 @@ struct log {
   int size;
   int outstanding; // how many FS sys calls are executing.
   int committing;  // in commit(), please wait.
+  int synchronizing;
   int dev;
   struct logheader lh;
 };
@@ -149,11 +150,13 @@ end_op(void)
 
   acquire(&log.lock);
   log.outstanding -= 1;
-  if(log.committing)
+  if(log.committing && !log.synchronizing)
     panic("log.committing");
   if(log.outstanding == 0){
     do_commit = 1;
     log.committing = 1;
+    while(log.synchronizing)
+      sleep(&log, &log.lock);
   } else {
     // begin_op() may be waiting for log space,
     // and decrementing log.outstanding has decreased
@@ -232,3 +235,52 @@ log_write(struct buf *b)
   release(&log.lock);
 }
 
+int
+sync(void)
+{
+  if(!log.lock.locked)
+    acquire(&log.lock);
+
+  if(log.committing || log.synchronizing)
+    return -1;
+
+  log.committing = 1;
+  log.synchronizing = 1;
+
+  release(&log.lock);
+
+  commit();
+  acquire(&log.lock);
+  log.committing = 0;
+  log.synchronizing = 0;
+  wakeup(&log);
+  release(&log.lock);
+
+  return 0;
+}
+
+void
+check_log_overflow(int write_byte)
+{
+  int write_block = 0;
+
+  if(write_byte % BSIZE == 0)
+    write_block = write_byte/BSIZE;
+  else
+    write_block = write_byte/BSIZE + 1;
+
+  acquire(&log.lock);
+  while(log.committing)
+    sleep(&log, &log.lock);
+
+  if(log.lh.n + (log.outstanding)*MAXOPBLOCKS + write_block > LOGSIZE)
+    sync();
+  else
+    release(&log.lock);
+}
+
+int 
+get_log_num(void)
+{
+  return log.lh.n;
+}

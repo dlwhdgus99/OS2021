@@ -104,6 +104,18 @@ sys_close(void)
 }
 
 int
+sys_sync(void)
+{
+  return sync();
+}
+
+int
+sys_get_log_num(void)
+{
+  return get_log_num();
+}
+
+int
 sys_fstat(void)
 {
   struct file *f;
