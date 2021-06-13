@@ -91,6 +91,30 @@ sys_write(void)
 }
 
 int
+sys_pread(void)
+{
+  int fd, n, off;
+  char *addr;
+
+  if(argint(0, &fd) < 0 || argint(2, &n) < 0 || 
+     argptr(1, &addr, n) < 0 || argint(3, &off) < 0)
+    return -1;
+  return pread(fd, addr, n, off);
+}
+
+int
+sys_pwrite(void)
+{
+  int fd, n, off;
+  char *addr;
+
+  if(argint(0, &fd) < 0 || argint(2, &n) < 0 ||
+     argptr(1, &addr, n) < 0 || argint(3, &off) < 0)
+    return -1;
+  return pwrite(fd, addr, n, off);
+}
+
+int
 sys_close(void)
 {
   int fd;

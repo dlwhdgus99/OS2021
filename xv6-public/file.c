@@ -5,6 +5,10 @@
 #include "types.h"
 #include "defs.h"
 #include "param.h"
+#include "memlayout.h"
+#include "mmu.h"
+#include "x86.h"
+#include "proc.h"
 #include "fs.h"
 #include "spinlock.h"
 #include "sleeplock.h"
@@ -158,27 +162,32 @@ int
 pread(int fd, void *addr, int n, int off)
 {
   int r;
+  struct proc *curproc = myproc();
+  struct file *f = curproc->ofile[fd];
 
   if(f->readable == 0)
     return -1;
   if(f->type == FD_INODE){
     ilock(f->ip);
-    readi(f->ip, addr, off, n)
+    readi(f->ip, addr, off, n);
     iunlock(f->ip);
     return r;
   }
-  panic("fileread");
+  panic("pread");
 }
 
 int
 pwrite(int fd, void *addr, int n, int off)
 {
-  int curoff = off;
+  int r;
+  struct proc *curproc = myproc();
+  struct file *f = curproc->ofile[fd];
 
   if(f->writable == 0)
     return -1;
   if(f->type == FD_INODE){
-  int max = ((MAXOPBLOCKS-1-1-2) / 2) * 512;
+    int curoff = off;
+    int max = ((MAXOPBLOCKS-1-1-2) / 2) * 512;
     int i = 0;
     while(i < n){
       int n1 = n - i;

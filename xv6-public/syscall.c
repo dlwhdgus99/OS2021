@@ -113,6 +113,8 @@ extern int sys_thread_exit(void);
 extern int sys_thread_join(void);
 extern int sys_sync(void);
 extern int sys_get_log_num(void);
+extern int sys_pread(void);
+extern int sys_pwrite(void);
 
 static int (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -146,6 +148,8 @@ static int (*syscalls[])(void) = {
 [SYS_thread_join]   sys_thread_join,
 [SYS_sync]	sys_sync,
 [SYS_get_log_num]   sys_get_log_num,
+[SYS_pread]	sys_pread,
+[SYS_pwrite]	sys_pwrite,
 };
 
 void
