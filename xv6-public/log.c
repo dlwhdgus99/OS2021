@@ -220,8 +220,8 @@ log_write(struct buf *b)
 
   if (log.lh.n >= LOGSIZE || log.lh.n >= log.size - 1)
     panic("too big a transaction");
-  if (log.outstanding < 1)
-    panic("log_write outside of trans");
+  //if (log.outstanding < 1)
+  //  panic("log_write outside of trans");
 
   acquire(&log.lock);
   for (i = 0; i < log.lh.n; i++) {
@@ -273,7 +273,9 @@ check_log_overflow(int write_byte)
   while(log.committing)
     sleep(&log, &log.lock);
 
-  if(log.lh.n + (log.outstanding)*MAXOPBLOCKS + write_block > LOGSIZE)
+//  cprintf("log.lh.n: %d, write_block: %d\n", log.lh.n, write_block);
+
+  if(log.lh.n + (log.outstanding+1)*MAXOPBLOCKS + write_block >= LOGSIZE)
     sync();
   else
     release(&log.lock);
