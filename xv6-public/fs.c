@@ -493,10 +493,10 @@ itrunc(struct inode *ip)
 	brelse(bp_double);
 	bfree(ip->dev, a[j]);
       }
-      brelse(bp);
-      bfree(ip->dev, ip->addrs[NDIRECT+1]);
-      ip->addrs[NDIRECT+1] = 0;
     }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   if(ip->addrs[NDIRECT+2]){
@@ -521,13 +521,11 @@ itrunc(struct inode *ip)
         brelse(bp_double);
         bfree(ip->dev, a[j]);
       }
-      brelse(bp);
-      bfree(ip->dev, ip->addrs[NDIRECT+2]);
-      ip->addrs[NDIRECT+2] = 0;
     }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+2]);
+    ip->addrs[NDIRECT+2] = 0;
   }
- 
-
 
   ip->size = 0;
   iupdate(ip);

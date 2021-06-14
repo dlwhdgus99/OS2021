@@ -142,10 +142,12 @@ filewrite(struct file *f, char *addr, int n)
         n1 = max;
       
       check_log_overflow(n1);
+      //begin_op();
       ilock(f->ip);
       if ((r = writei(f->ip, addr + i, f->off, n1)) > 0)
         f->off += r;
       iunlock(f->ip);
+      //end_op();
 
       if(r < 0)
         break;
@@ -167,9 +169,11 @@ pread(int fd, void *addr, int n, int off)
 
   if(f->readable == 0)
     return -1;
+  if(f->type == FD_PIPE)
+    return -1;
   if(f->type == FD_INODE){
     ilock(f->ip);
-    readi(f->ip, addr, off, n);
+    r = readi(f->ip, addr, off, n);
     iunlock(f->ip);
     return r;
   }
@@ -184,6 +188,8 @@ pwrite(int fd, void *addr, int n, int off)
   struct file *f = curproc->ofile[fd];
 
   if(f->writable == 0)
+    return -1;
+  if(f->type == FD_PIPE)
     return -1;
   if(f->type == FD_INODE){
     int curoff = off;
