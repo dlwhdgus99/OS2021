@@ -260,15 +260,8 @@ sync(void)
 }
 
 void
-check_log_overflow(int write_byte)
+check_log_overflow()
 {
-//  int write_block = 0;
-//
-  //if(write_byte % BSIZE == 0)
-//    write_block = write_byte/BSIZE;
-//  else
-//    write_block = write_byte/BSIZE + 1;
-
   acquire(&log.lock);
   while(log.committing)
     sleep(&log, &log.lock);
