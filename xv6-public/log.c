@@ -262,12 +262,12 @@ sync(void)
 void
 check_log_overflow(int write_byte)
 {
-  int write_block = 0;
-
-  if(write_byte % BSIZE == 0)
-    write_block = write_byte/BSIZE;
-  else
-    write_block = write_byte/BSIZE + 1;
+//  int write_block = 0;
+//
+  //if(write_byte % BSIZE == 0)
+//    write_block = write_byte/BSIZE;
+//  else
+//    write_block = write_byte/BSIZE + 1;
 
   acquire(&log.lock);
   while(log.committing)
@@ -275,7 +275,7 @@ check_log_overflow(int write_byte)
 
 //  cprintf("log.lh.n: %d, write_block: %d\n", log.lh.n, write_block);
 
-  if(log.lh.n + (log.outstanding+1)*MAXOPBLOCKS + write_block >= LOGSIZE)
+  if(log.lh.n + (log.outstanding+1)*MAXOPBLOCKS > LOGSIZE)
     sync();
   else
     release(&log.lock);
